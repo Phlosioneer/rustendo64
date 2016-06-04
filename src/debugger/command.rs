@@ -5,6 +5,7 @@ pub enum Command {
     Step,
     Exit,
     Repeat,
+    Continue,
 }
 
 impl FromStr for Command {
@@ -16,6 +17,7 @@ impl FromStr for Command {
             "" => Ok(Command::Repeat),
             "step" | "s" => Ok(Command::Step),
             "exit" | "quit" | "e" | "q" => Ok(Command::Exit),
+            "continue" | "cont" | "c" => Ok(Command::Continue),
             _ => Err(()),
         }
     }

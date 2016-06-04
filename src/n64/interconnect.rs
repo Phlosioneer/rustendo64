@@ -49,6 +49,10 @@ impl Interconnect {
     pub fn pif(&self) -> &Pif {
         &self.pif
     }
+    
+    pub fn rsp(&self) -> &Rsp {
+	    	&self.rsp
+    }
 
     pub fn read_word(&self, addr: u32) -> u32 {
         match mem_map::map_addr(addr) {

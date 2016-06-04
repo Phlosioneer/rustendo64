@@ -40,6 +40,7 @@ impl Debugger {
                 Ok(Command::Step) => self.step(),
                 Ok(Command::Exit) => break,
                 Ok(Command::Repeat) => unreachable!(),
+                Ok(Command::Continue) => { loop { self.step() } },
                 Err(e) => println!("{}", e),
             }
 
@@ -52,6 +53,7 @@ impl Debugger {
         let addr = mem_map::map_addr(current_pc as u32);
         let instr = Instruction(match addr {
             PifRom(offset) => self.n64.interconnect().pif().read_boot_rom(offset),
+            SpImem(offset) => self.n64.interconnect().rsp().read_imem(offset),
             _ => panic!("Debugger can't inspect address: {:?}", addr),
         });
 
