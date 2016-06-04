@@ -44,6 +44,7 @@ const PI_BSD_DOM1_RLS_REG: u32 =    0x0460_0020;
 const SI_BASE_REG: u32 =            0x0480_0000;
 const SI_STATUS_REG: u32 =          0x0480_0018;
 
+#[derive(Debug)]
 pub enum Addr {
     PifRom(u32),
     PifRam(u32),
@@ -71,7 +72,7 @@ pub enum Addr {
     PiBsdDom1PgsReg,
     PiBsdDom1RlsReg,
 
-    SiStatusReg
+    SiStatusReg,
 }
 
 pub fn map_addr(addr: u32) -> Addr {
@@ -110,6 +111,6 @@ pub fn map_addr(addr: u32) -> Addr {
 
         SI_STATUS_REG => Addr::SiStatusReg,
 
-        _ => panic!("Unrecognized physical address: {:#x}", addr)
+        _ => panic!("Unrecognized physical address: {:#x}", addr),
     }
 }

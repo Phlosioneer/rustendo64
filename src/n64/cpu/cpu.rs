@@ -1,9 +1,8 @@
-use super::super::interconnect;
-use super::cp0;
+use super::{cp0, Instruction};
 use super::opcode::Opcode::*;
-use super::opcode::SpecialOpcode::*;
 use super::opcode::RegImmOpcode::*;
-use super::instruction::Instruction;
+use super::opcode::SpecialOpcode::*;
+use super::super::Interconnect;
 
 use std::fmt;
 
@@ -11,17 +10,12 @@ const NUM_GPR: usize = 32;
 
 enum SignExtendResult {
     Yes,
-    No
+    No,
 }
 
 enum WriteLink {
     Yes,
-    No
-}
-
-enum DelaySlot {
-    Yes,
-    No
+    No,
 }
 
 pub struct Cpu {
@@ -40,11 +34,11 @@ pub struct Cpu {
 
     cp0: cp0::Cp0,
 
-    interconnect: interconnect::Interconnect
+    delay_slot_pc: Option<u64>,
 }
 
 impl Cpu {
-    pub fn new(interconnect: interconnect::Interconnect) -> Cpu {
+    pub fn new() -> Cpu {
         Cpu {
             reg_gpr: [0; NUM_GPR],
             reg_fpr: [0.0; NUM_GPR],
@@ -61,31 +55,41 @@ impl Cpu {
 
             cp0: cp0::Cp0::default(),
 
-            interconnect: interconnect
+            delay_slot_pc: None,
         }
     }
 
-    // TODO: Different interface
-    pub fn run(&mut self) {
-        loop {
-            self.run_instruction();
+    pub fn current_pc_virt(&self) -> u64 {
+        self.delay_slot_pc.unwrap_or(self.reg_pc)
+    }
+
+    pub fn current_pc_phys(&self) -> u64 {
+        self.virt_addr_to_phys_addr(self.current_pc_virt())
+    }
+
+    pub fn will_execute_from_delay_slot(&self) -> bool {
+        self.delay_slot_pc.is_some()
+    }
+
+    pub fn step(&mut self, interconnect: &mut Interconnect) {
+        if let Some(pc) = self.delay_slot_pc {
+            let instr = self.read_instruction(interconnect, pc);
+            self.delay_slot_pc = None;
+
+            self.execute_instruction(interconnect, instr);
+        } else {
+            let instr = self.read_instruction(interconnect, self.reg_pc);
+
+            self.reg_pc += 4;
+            self.execute_instruction(interconnect, instr);
         }
     }
 
-    pub fn run_instruction(&mut self) {
-        let instr = self.read_instruction(self.reg_pc);
-
-        self.print_instr(instr, self.reg_pc, DelaySlot::No);
-
-        self.reg_pc += 4;
-        self.execute_instruction(instr);
+    fn read_instruction(&self, interconnect: &mut Interconnect, addr: u64) -> Instruction {
+        Instruction(self.read_word(interconnect, addr))
     }
 
-    fn read_instruction(&self, addr: u64) -> Instruction {
-        Instruction(self.read_word(addr))
-    }
-
-    fn execute_instruction(&mut self, instr: Instruction) {
+    fn execute_instruction(&mut self, interconnect: &mut Interconnect, instr: Instruction) {
         match instr.opcode() {
             Special => {
                 match instr.special_op() {
@@ -116,7 +120,7 @@ impl Cpu {
                         // Update PC before executing delay slot instruction
                         self.reg_pc = self.read_reg_gpr(instr.rs());
 
-                        self.execute_delay_slot(delay_slot_pc);
+                        self.delay_slot_pc = Some(delay_slot_pc);
                     }
 
                     Multu => {
@@ -147,7 +151,7 @@ impl Cpu {
                     Or => self.reg_instr(instr, |rs, rt, _| rs | rt),
                     Xor => self.reg_instr(instr, |rs, rt, _| rs ^ rt),
 
-                    Sltu => self.reg_instr(instr, |rs, rt, _| if rs < rt { 1 } else { 0 })
+                    Sltu => self.reg_instr(instr, |rs, rt, _| if rs < rt { 1 } else { 0 }),
                 }
             }
 
@@ -188,8 +192,8 @@ impl Cpu {
                 self.cp0.write_reg(instr.rd(), data);
             }
 
-            Beq => { self.branch(instr, WriteLink::No, |rs, rt| rs == rt); },
-            Bne => { self.branch(instr, WriteLink::No, |rs, rt| rs != rt); },
+            Beq => { self.branch(instr, WriteLink::No, |rs, rt| rs == rt); }
+            Bne => { self.branch(instr, WriteLink::No, |rs, rt| rs != rt); }
 
             Beql => self.branch_likely(instr, |rs, rt| rs == rt),
             Bnel => self.branch_likely(instr, |rs, rt| rs != rt),
@@ -199,9 +203,9 @@ impl Cpu {
 
                 let sign_extended_offset = instr.offset_sign_extended();
                 let virt_addr = self.read_reg_gpr(base).wrapping_add(sign_extended_offset);
-                let mem = (self.read_word(virt_addr) as i32) as u64;
+                let mem = (self.read_word(interconnect, virt_addr) as i32) as u64;
                 self.write_reg_gpr(instr.rt(), mem);
-            },
+            }
 
             Sw => {
                 let base = instr.rs();
@@ -209,12 +213,14 @@ impl Cpu {
                 let sign_extended_offset = instr.offset_sign_extended();
                 let virt_addr = self.read_reg_gpr(base).wrapping_add(sign_extended_offset);
                 let mem = self.read_reg_gpr(instr.rt()) as u32;
-                self.write_word(virt_addr, mem);
+                self.write_word(interconnect, virt_addr, mem);
             }
         }
     }
 
-    fn imm_instr<F>(&mut self, instr: Instruction, sign_extend_result: SignExtendResult, f: F) where F: FnOnce(u64, u64, u64) -> u64 {
+    fn imm_instr<F>(&mut self, instr: Instruction, sign_extend_result: SignExtendResult, f: F)
+        where F: FnOnce(u64, u64, u64) -> u64
+    {
         let rs = self.read_reg_gpr(instr.rs());
         let imm = instr.imm() as u64;
         let imm_sign_extended = instr.imm_sign_extended();
@@ -222,12 +228,14 @@ impl Cpu {
         let sign_extended_value = (value as i32) as u64;
         let value = match sign_extend_result {
             SignExtendResult::Yes => sign_extended_value,
-            _ => value
+            _ => value,
         };
         self.write_reg_gpr(instr.rt(), value);
     }
 
-    fn reg_instr<F>(&mut self, instr: Instruction, f: F) where F: FnOnce(u64, u64, u32) -> u64 {
+    fn reg_instr<F>(&mut self, instr: Instruction, f: F)
+        where F: FnOnce(u64, u64, u32) -> u64
+    {
         let rs = self.read_reg_gpr(instr.rs());
         let rt = self.read_reg_gpr(instr.rt());
         let sa = instr.sa();
@@ -236,7 +244,9 @@ impl Cpu {
         self.write_reg_gpr(instr.rd() as usize, sign_extended_value);
     }
 
-    fn branch<F>(&mut self, instr: Instruction, write_link: WriteLink, f: F) -> bool where F: FnOnce(u64, u64) -> bool {
+    fn branch<F>(&mut self, instr: Instruction, write_link: WriteLink, f: F) -> bool
+        where F: FnOnce(u64, u64) -> bool
+    {
         let rs = self.read_reg_gpr(instr.rs());
         let rt = self.read_reg_gpr(instr.rt());
         let is_taken = f(rs, rt);
@@ -253,46 +263,29 @@ impl Cpu {
             // Update PC before executing delay slot instruction
             self.reg_pc = self.reg_pc.wrapping_add(sign_extended_offset);
 
-            self.execute_delay_slot(delay_slot_pc);
+            self.delay_slot_pc = Some(delay_slot_pc);
         }
 
         is_taken
     }
 
-    fn branch_likely<F>(&mut self, instr: Instruction, f: F) where F: FnOnce(u64, u64) -> bool {
+    fn branch_likely<F>(&mut self, instr: Instruction, f: F)
+        where F: FnOnce(u64, u64) -> bool
+    {
         if !self.branch(instr, WriteLink::No, f) {
             // Skip over delay slot instruction when not branching
             self.reg_pc = self.reg_pc.wrapping_add(4);
         }
     }
 
-    fn print_instr(&self, instr: Instruction, pc: u64, delay_slot: DelaySlot) {
-        print!("reg_pc {:018X}: ", pc);
-        match instr.opcode() {
-            Special => print!("Special: {:?}", instr.special_op()),
-            RegImm => print!("RegImm: {:?}", instr.reg_imm_op()),
-            _ => print!("{:?}", instr)
-        }
-        match delay_slot {
-            DelaySlot::Yes => println!(" (DELAY)"),
-            _ => println!("")
-        };
-    }
-
-    fn execute_delay_slot(&mut self, delay_slot_pc: u64) {
-        let delay_slot_instr = self.read_instruction(delay_slot_pc);
-        self.print_instr(delay_slot_instr, delay_slot_pc, DelaySlot::Yes);
-        self.execute_instruction(delay_slot_instr);
-    }
-
-    fn read_word(&self, virt_addr: u64) -> u32 {
+    fn read_word(&self, interconnect: &mut Interconnect, virt_addr: u64) -> u32 {
         let phys_addr = self.virt_addr_to_phys_addr(virt_addr);
-        self.interconnect.read_word(phys_addr as u32)
+        interconnect.read_word(phys_addr as u32)
     }
 
-    fn write_word(&mut self, virt_addr: u64, value: u32) {
+    fn write_word(&mut self, interconnect: &mut Interconnect, virt_addr: u64, value: u32) {
         let phys_addr = self.virt_addr_to_phys_addr(virt_addr);
-        self.interconnect.write_word(phys_addr as u32, value);
+        interconnect.write_word(phys_addr as u32, value);
     }
 
     fn virt_addr_to_phys_addr(&self, virt_addr: u64) -> u64 {
@@ -317,7 +310,7 @@ impl Cpu {
     fn read_reg_gpr(&self, index: usize) -> u64 {
         match index {
             0 => 0,
-            _ => self.reg_gpr[index]
+            _ => self.reg_gpr[index],
         }
     }
 }
@@ -332,10 +325,10 @@ impl fmt::Debug for Cpu {
         "t8", "t9", "k0", "k1", "gp", "sp", "s8", "ra",
         ];
 
-        try!(write!(f,"\nCPU General Purpose Registers:"));
+        try!(write!(f, "\nCPU General Purpose Registers:"));
         for reg_num in 0..NUM_GPR {
             if (reg_num % REGS_PER_LINE) == 0 {
-                try!(writeln!(f,""));
+                try!(writeln!(f, ""));
             }
             try!(write!(f,
                 "{reg_name}/gpr{num:02}: {value:#018X} ",
@@ -345,19 +338,18 @@ impl fmt::Debug for Cpu {
             ));
         }
 
-        try!(write!(f,"\n\nCPU Floating Point Registers:"));
+        try!(write!(f, "\n\nCPU Floating Point Registers:"));
         for reg_num in 0..NUM_GPR {
             if (reg_num % REGS_PER_LINE) == 0 {
-                try!(writeln!(f,""));
+                try!(writeln!(f, ""));
             }
             try!(write!(f,
                 "fpr{num:02}: {value:21} ",
                 num = reg_num,
-                value = self.reg_fpr[reg_num],)
-            );
+                value = self.reg_fpr[reg_num]));
         }
 
-        try!(writeln!(f,"\n\nCPU Special Registers:"));
+        try!(writeln!(f, "\n\nCPU Special Registers:"));
         try!(writeln!(f,
             "\
             reg_pc: {:#018X}\n\
@@ -375,7 +367,6 @@ impl fmt::Debug for Cpu {
             self.reg_fcr31
         ));
 
-        try!(writeln!(f, "{:#?}", self.cp0));
-        writeln!(f, "{:#?}", self.interconnect)
+        writeln!(f, "{:#?}", self.cp0)
     }
 }
